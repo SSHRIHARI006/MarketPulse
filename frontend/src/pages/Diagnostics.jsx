@@ -144,7 +144,7 @@ export default function Diagnostics() {
                 hint="excluded: stored outside 09:15–15:30 IST"
               />
               <Figure label="Truncated" value={dataset.truncatedRecords} />
-              <Figure label="Source" value={dataset.source} />
+              <Figure label="Provenance" value={dataset.provenance || dataset.source} />
             </div>
           ) : (
             <p className="mt-3 text-[11px] text-slate-500">No replay dataset is loaded.</p>
@@ -172,7 +172,8 @@ export default function Diagnostics() {
               ['Events accepted', processing?.eventsAccepted],
               ['Events rejected', processing?.eventsRejected],
               ['Market-store updates', processing?.marketStoreUpdates],
-              ['Candle updates', processing?.candleUpdates],
+              ['Candle bucket updates', processing?.candleUpdates],
+              ['Candle aggregation inputs', processing?.candleAggregationInputs],
               ['Broadcast batches', data?.broadcast?.batchesEmitted],
               ['Quotes broadcast', data?.broadcast?.quotesEmitted],
               ['Socket clients', data?.broadcast?.socketClients],

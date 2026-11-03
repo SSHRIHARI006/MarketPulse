@@ -45,7 +45,7 @@ function ensureBucket(stockId, interval, start) {
 
 /** Folds a validated quote into every interval bucket it belongs to. */
 export function ingestQuote(quote) {
-  if (!quote || !Number.isFinite(quote.price)) return;
+  if (!quote || !Number.isFinite(quote.price)) return 0;
   // Replayed observations must be bucketed by their historical timestamp; the wall
   // clock would stack an entire session into the current minute.
   const at = quote.candleAt ? new Date(quote.candleAt) : quote.receivedAt ? new Date(quote.receivedAt) : new Date();
@@ -58,7 +58,18 @@ export function ingestQuote(quote) {
     const active = ensureBucket(quote.stockId, interval, start);
 
     if (isNew) {
-      active.volumeBase = cumulativeVolume ?? 0;
+      // Replay events carry a cumulative session volume plus the source bar's
+      // volume in `lastQuantity`. The first bar in a new bucket must retain that
+      // bar volume instead of treating the cumulative value as the bucket base.
+      // Keep the existing LIVE/DEMO behaviour unchanged: only normalized
+      // one-minute replay candles use this adjustment.
+      const replayBarVolume =
+        quote.sourceGranularity === 'ONE_MINUTE_CANDLE' && Number.isFinite(quote.lastQuantity)
+          ? Math.max(0, Number(quote.lastQuantity))
+          : null;
+      active.volumeBase = replayBarVolume === null
+        ? cumulativeVolume ?? 0
+        : Math.max(0, (cumulativeVolume ?? replayBarVolume) - replayBarVolume);
       active.open = quote.price;
       active.high = quote.price;
       active.low = quote.price;
@@ -75,6 +86,7 @@ export function ingestQuote(quote) {
     }
     dirty.add(key(quote.stockId, interval));
   }
+  return intervals.length;
 }
 
 export function getOpenCandle(stockId, interval) {

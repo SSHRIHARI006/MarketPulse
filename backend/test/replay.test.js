@@ -2,9 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { normaliseEvents, REJECTION_REASONS, istDayBounds, isValidTradingDate } from '../src/replay/dataset.js';
 import { ReplayEngine, REPLAY_STATES } from '../src/replay/engine.js';
+import { createReplayLoadQueue } from '../src/replay/session.js';
 import { marketStore } from '../src/services/marketStore.js';
-import { processTick } from '../src/services/tickPipeline.js';
+import { processTick, processTickDetailed } from '../src/services/tickPipeline.js';
 import { getOpenCandle } from '../src/services/candle.service.js';
+import { clearCandles, ingestQuote } from '../src/services/candle.service.js';
 import { sanitizeTick } from '../src/utils/validators.js';
 
 const SESSION = '2026-11-02';
@@ -353,6 +355,75 @@ test('replayed observations enter the store with historical timestamps', () => {
   assert.equal(marketStore.nowTs(), new Date('2026-11-02T03:45:00.000Z').getTime());
   assert.equal(marketStore.getDataStatus(quote), 'FRESH');
   assert.equal(marketStore.getMarketStatus().label, 'Session open (replay)');
+});
+
+test('the first replay candle keeps the source minute volume', () => {
+  clearCandles();
+  ingestQuote({
+    stockId: 1,
+    price: 101,
+    volume: 1250,
+    lastQuantity: 250,
+    candleAt: new Date('2026-11-02T03:45:00.000Z'),
+    sourceGranularity: 'ONE_MINUTE_CANDLE'
+  });
+  const candle = getOpenCandle(1, '1m');
+  assert.equal(candle.volume, 250);
+  clearCandles();
+
+  // Existing LIVE/DEMO cumulative-volume semantics remain unchanged.
+  ingestQuote({
+    stockId: 1,
+    price: 102,
+    volume: 1250,
+    lastQuantity: 250,
+    candleAt: new Date('2026-11-02T03:46:00.000Z')
+  });
+  assert.equal(getOpenCandle(1, '1m').volume, 0);
+  clearCandles();
+});
+
+test('replay load requests are serialized in request order', async () => {
+  const queue = createReplayLoadQueue();
+  const order = [];
+  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const first = queue(async () => {
+    order.push('first-start');
+    await delay(15);
+    order.push('first-end');
+  });
+  const second = queue(async () => {
+    order.push('second-start');
+    order.push('second-end');
+  });
+  await Promise.all([first, second]);
+  assert.deepEqual(order, ['first-start', 'first-end', 'second-start', 'second-end']);
+});
+
+test('pipeline diagnostics distinguish store and candle aggregation stages', () => {
+  clearCandles();
+  marketStore.registerStocks([
+    { id: 1, symbol: 'AAA', company_name: 'Alpha Ltd', instrument_key: 'NSE_EQ|AAA', sector: 'IT', market_cap: 1000 }
+  ]);
+  const result = processTickDetailed({
+    instrumentKey: 'NSE_EQ|AAA',
+    lastPrice: 101,
+    previousClose: 100,
+    volume: 250,
+    lastQuantity: 250,
+    lastTradedAt: '2026-11-02T03:45:00.000Z',
+    open: 100,
+    high: 102,
+    low: 99,
+    candleAt: new Date('2026-11-02T03:45:00.000Z'),
+    providerTimestamp: '2026-11-02T03:45:00.000Z',
+    sourceGranularity: 'ONE_MINUTE_CANDLE',
+    sessionId: 'diagnostics-test',
+    eventId: 'diagnostics-test:1'
+  });
+  assert.deepEqual(result, { accepted: true, marketStoreUpdated: true, candleUpdates: 4 });
+  clearCandles();
 });
 
 test('the market store rejects duplicate and out-of-order replay events', () => {

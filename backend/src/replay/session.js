@@ -1,6 +1,6 @@
 import { config, dataSource } from '../config/env.js';
 import { marketStore } from '../services/marketStore.js';
-import { processTick } from '../services/tickPipeline.js';
+import { processTickDetailed } from '../services/tickPipeline.js';
 import { clearCandles, deleteCandlesBySource } from '../services/candle.service.js';
 import { sanitizeTick } from '../utils/validators.js';
 import { ReplayEngine, REPLAY_STATES } from './engine.js';
@@ -25,6 +25,19 @@ let counters = emptyCounters();
 let perInstrument = new Map();
 let volumeState = new Map();
 let loadPromise = null;
+// All session loads share one queue. This prevents two HTTP clients from loading
+// datasets concurrently and lets the first operation pause the active engine before
+// either query can install a replacement session.
+export function createReplayLoadQueue() {
+  let tail = Promise.resolve();
+  return (operation) => {
+    const next = tail.catch(() => {}).then(operation);
+    tail = next.catch(() => {});
+    return next;
+  };
+}
+
+const sessionLoadQueue = createReplayLoadQueue();
 
 function emptyCounters() {
   return {
@@ -174,12 +187,13 @@ function handleBatch(events, meta) {
       continue;
     }
 
-    const accepted = processTick(tick);
-    if (accepted) {
+    const result = processTickDetailed(tick);
+    if (result.accepted) {
       counters.eventsAccepted += 1;
-      counters.marketStoreUpdates += 1;
-      // processTick folds every accepted quote into the candle aggregator.
-      counters.candleUpdates += 1;
+      counters.marketStoreUpdates += result.marketStoreUpdated ? 1 : 0;
+      // This is the number of interval buckets updated by candle aggregation
+      // (1m, 5m, 15m and 1d), not merely the number of accepted events.
+      counters.candleUpdates += result.candleUpdates;
       const quote = marketStore.getQuote(event.stockId);
       if (entry) {
         entry.acceptedEvents += 1;
@@ -228,13 +242,18 @@ export async function latestSessionDate() {
 }
 
 /**
- * Loads (or switches to) a historical session.
+ * Performs one serialized load (or switch to) a historical session.
  *
  * Nothing is deleted from the dataset; only replay-owned in-memory state and the
  * 'replay' provenance rows this engine wrote previously are cleared.
  */
-export async function loadReplaySession(tradingDate) {
+async function performLoadReplaySession(tradingDate) {
   const engineRef = ensureEngine();
+
+  // Pause before any asynchronous work. The previous implementation waited until
+  // after loadSession(), allowing old events to continue while a new dataset was
+  // being read and validated.
+  engineRef.pause();
 
   const date = tradingDate || config.replay.defaultSession || (await latestSessionDate());
   if (!date) {
@@ -267,9 +286,8 @@ export async function loadReplaySession(tradingDate) {
     throw Object.assign(new Error(`No historical data is available for ${date}`), { status: 404 });
   }
 
-  // Stop the previous session before its state is replaced, and remove the bars the
-  // previous replay wrote so a new session never inherits them.
-  engineRef.pause();
+  // The active scheduler is already stopped above; now replace only replay-owned
+  // state after the new dataset has been fully loaded and validated.
   clearCandles();
   await deleteCandlesBySource(dataSource());
 
@@ -290,6 +308,14 @@ export async function loadReplaySession(tradingDate) {
   );
 
   return replaySnapshot();
+}
+
+/**
+ * Serializes concurrent session-switch requests. Each request still receives its
+ * own result, but no two loads can race to install datasets or replay-owned state.
+ */
+export function loadReplaySession(tradingDate) {
+  return sessionLoadQueue(() => performLoadReplaySession(tradingDate));
 }
 
 /** Ensures a session is loaded; used at start-up and by the API guards. */
@@ -402,6 +428,8 @@ export function getReplayDiagnostics() {
     dataset: datasetSummary(dataset),
     processing: {
       ...counters,
+      // Explicit stage aliases make the meanings unambiguous to API consumers.
+      candleAggregationInputs: counters.eventsAccepted,
       eventsScheduled: snapshot.counters?.eventsScheduled ?? 0,
       scheduledNotEmitted: Math.max(0, (snapshot.counters?.eventsScheduled ?? 0) - counters.eventsEmitted)
     },

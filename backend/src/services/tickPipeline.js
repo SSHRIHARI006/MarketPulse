@@ -9,23 +9,32 @@ import { ingestQuote } from './candle.service.js';
  * candle aggregation and analytics behave identically no matter where the
  * observation came from (spec 8.2). Nothing in this module knows about providers.
  */
-export function processTick(tick) {
-  if (!tick || typeof tick.instrumentKey !== 'string') return false;
+export function processTickDetailed(tick) {
+  if (!tick || typeof tick.instrumentKey !== 'string') {
+    return { accepted: false, marketStoreUpdated: false, candleUpdates: 0 };
+  }
 
   // Index instruments feed the overview cards, not the stock universe.
   if (config.indices.some((index) => index.key === tick.instrumentKey)) {
-    return marketStore.applyIndexTick(tick.instrumentKey, tick);
+    const updated = marketStore.applyIndexTick(tick.instrumentKey, tick);
+    return { accepted: updated, marketStoreUpdated: updated, candleUpdates: 0 };
   }
 
   const stock = marketStore.getStockByKey(tick.instrumentKey);
   if (!stock) {
     marketStore.recordRejectedTick();
-    return false;
+    return { accepted: false, marketStoreUpdated: false, candleUpdates: 0 };
   }
-  if (!marketStore.applyTick(tick)) return false;
+  if (!marketStore.applyTick(tick)) {
+    return { accepted: false, marketStoreUpdated: false, candleUpdates: 0 };
+  }
   const quote = marketStore.getQuote(stock.id);
-  if (quote) ingestQuote(quote);
-  return true;
+  const candleUpdates = quote ? ingestQuote(quote) : 0;
+  return { accepted: true, marketStoreUpdated: true, candleUpdates };
+}
+
+export function processTick(tick) {
+  return processTickDetailed(tick).accepted;
 }
 
 export function handleTicks(ticks) {

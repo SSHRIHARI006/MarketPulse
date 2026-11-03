@@ -350,9 +350,13 @@ export async function loadSession(tradingDate, { sessionId } = {}) {
 /** Diagnostics-friendly summary of the dataset that is currently loaded. */
 export function datasetSummary(dataset) {
   if (!dataset) return null;
+  const provenance = dataset.source === 'demo'
+    ? 'Synthetic DEMO history'
+    : `${String(dataset.source || 'unknown').toUpperCase()} historical dataset`;
   return {
     tradingDate: dataset.tradingDate,
     source: dataset.source,
+    provenance,
     granularity: dataset.granularity,
     configuredInstruments: dataset.coverage.configuredInstruments,
     availableInstruments: dataset.coverage.availableInstruments,

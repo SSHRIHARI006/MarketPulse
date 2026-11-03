@@ -110,8 +110,9 @@ export default function ReplayPanel() {
             </span>
           </div>
           <p className="mt-1 text-[11px] text-slate-500">
-            Not a live market feed. Prices below are observations replayed from stored one-minute bars for the
-            historical session; timestamps are the original ones.
+            Not a live market feed. This is {replay.datasetSource === 'demo' ? 'synthetic DEMO history' : 'historical data'}
+            replayed at {replay.granularity === 'ONE_MINUTE_CANDLE' ? 'ONE_MINUTE_CANDLE' : 'the reported source granularity'};
+            timestamps remain the original historical ones.
           </p>
         </div>
 
@@ -211,6 +212,7 @@ export default function ReplayPanel() {
             </span>
           ) : null}
           <span>{replay.granularity === 'ONE_MINUTE_CANDLE' ? 'Source granularity: one-minute candles' : 'Granularity unknown'}</span>
+          <span>{replay.datasetSource === 'demo' ? 'Dataset: synthetic DEMO history' : `Dataset: ${replay.datasetSource || 'unknown'}`}</span>
           {replay.error ? <span className="text-rose-400">{replay.error}</span> : null}
         </div>
       </div>
