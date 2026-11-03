@@ -2,6 +2,7 @@ import { getMarketOverview, getMovers } from '../services/analytics.service.js';
 import { buildHeatmap } from '../services/heatmap.service.js';
 import { marketStore } from '../services/marketStore.js';
 import { getUniverse } from '../services/marketData.service.js';
+import { replaySnapshot } from '../replay/session.js';
 import { validateRange, validateSizeBy } from '../utils/validators.js';
 
 export async function overview(req, res) {
@@ -18,6 +19,7 @@ export async function heatmap(req, res) {
 export async function status(req, res) {
   res.json({
     mode: marketStore.connection.mode,
+    replay: replaySnapshot(),
     state: marketStore.connection.state,
     connection: marketStore.connection,
     connected: marketStore.connection.connected,
@@ -46,6 +48,10 @@ export async function snapshot(req, res) {
     subscription: snap.subscription,
     marketStatus: snap.marketStatus,
     indices: snap.indices,
+    // Replay metadata travels with the snapshot so a late snapshot can be rejected
+    // by the client when a newer session is playing (spec 12.4).
+    replay: snap.replay,
+    simulatedTime: snap.simulatedTime,
     stocks: snap.quotes.map((quote) => ({
       id: quote.stockId,
       symbol: quote.symbol,
@@ -61,6 +67,12 @@ export async function snapshot(req, res) {
       low: quote.low,
       lastTradeTime: quote.tradedAt,
       receivedAt: quote.receivedAt,
+      updatedAt: quote.updatedAt,
+      candleAt: quote.candleAt,
+      providerTimestamp: quote.providerTimestamp,
+      sourceGranularity: quote.sourceGranularity,
+      sessionId: quote.sessionId,
+      eventId: quote.eventId,
       dataStatus: quote.dataStatus
     }))
   });
@@ -68,7 +80,7 @@ export async function snapshot(req, res) {
 
 /** Feed and instrument health. Credentials are never included. */
 export async function diagnostics(req, res) {
-  res.json(marketStore.getDiagnostics());
+  res.json({ ...marketStore.getDiagnostics(), replay: replaySnapshot() });
 }
 
 /** The tracked constituent universe, independent of current prices. */

@@ -46,7 +46,9 @@ function ensureBucket(stockId, interval, start) {
 /** Folds a validated quote into every interval bucket it belongs to. */
 export function ingestQuote(quote) {
   if (!quote || !Number.isFinite(quote.price)) return;
-  const at = quote.receivedAt ? new Date(quote.receivedAt) : new Date();
+  // Replayed observations must be bucketed by their historical timestamp; the wall
+  // clock would stack an entire session into the current minute.
+  const at = quote.candleAt ? new Date(quote.candleAt) : quote.receivedAt ? new Date(quote.receivedAt) : new Date();
   const cumulativeVolume = Number.isFinite(quote.volume) ? quote.volume : null;
 
   for (const interval of intervals) {
@@ -77,6 +79,22 @@ export function ingestQuote(quote) {
 
 export function getOpenCandle(stockId, interval) {
   return buckets.get(key(stockId, interval)) || null;
+}
+
+/** Drops in-memory buckets (replay reset / session switch). Persisted rows are separate. */
+export function clearCandles() {
+  buckets.clear();
+  dirty.clear();
+}
+
+/**
+ * Removes candles belonging to one provenance. Replay uses this so restarting a
+ * session rebuilds its own bars instead of merging with the previous run, while the
+ * historical dataset it reads (a different source) is never touched.
+ */
+export async function deleteCandlesBySource(source) {
+  const { rowCount } = await query('DELETE FROM stock_candles WHERE source = $1', [source]);
+  return rowCount;
 }
 
 /** Persists all changed buckets. Safe to call frequently; no-op when clean. */

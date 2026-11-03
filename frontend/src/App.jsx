@@ -4,6 +4,7 @@ import Dashboard from './pages/Dashboard';
 import StockDetail from './pages/StockDetail';
 import Compare from './pages/Compare';
 import Watchlist from './pages/Watchlist';
+import Diagnostics from './pages/Diagnostics';
 import { MarketProvider } from './context/MarketContext';
 
 function NotFound() {
@@ -28,6 +29,7 @@ export default function App() {
             <Route path="/stock/:id" element={<StockDetail />} />
             <Route path="/compare" element={<Compare />} />
             <Route path="/watchlist" element={<Watchlist />} />
+            <Route path="/diagnostics" element={<Diagnostics />} />
             <Route path="*" element={<NotFound />} />
           </Route>
         </Routes>

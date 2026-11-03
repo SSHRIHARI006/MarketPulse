@@ -1,6 +1,9 @@
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import { api } from '../lib/api';
+import { mergeQuote } from '../lib/quoteMerge';
+
+export { mergeQuote };
 
 const MarketContext = createContext(null);
 
@@ -15,16 +18,11 @@ const EMPTY = {
   quotes: {},
   indices: [],
   events: [],
+  replay: null,
   socketConnected: false,
   lastUpdate: null,
   lastSnapshotAt: null,
   snapshotRefreshMs: DEFAULT_SNAPSHOT_REFRESH_MS
-};
-
-const newer = (incoming, existing) => {
-  const a = incoming ? new Date(incoming).getTime() : 0;
-  const b = existing ? new Date(existing).getTime() : 0;
-  return a >= b;
 };
 
 /**
@@ -32,41 +30,84 @@ const newer = (incoming, existing) => {
  *
  * The socket is the primary source of updates. Every ~5 seconds the client also
  * re-requests `/api/market/snapshot`, which is served from the backend's cache, and
- * merges it per stock (newest message wins). That repairs events missed while the
- * socket was down without inventing movement: an unchanged stock keeps its price.
+ * merges it per stock through the same merge function used for socket frames, so a
+ * delayed snapshot can never overwrite a newer observation.
+ *
+ * Replay state is owned by the backend. This provider only forwards commands and
+ * stores the state it is told.
  */
 export function MarketProvider({ children }) {
   const [state, setState] = useState(EMPTY);
   const snapshotRefreshRef = useRef(DEFAULT_SNAPSHOT_REFRESH_MS);
+  const replaySessionRef = useRef(null);
+  const lastReportRef = useRef(0);
+  const socketRef = useRef(null);
+
+  const applyReplay = useCallback((status) => {
+    if (!status) return;
+    replaySessionRef.current = status.sessionId ?? replaySessionRef.current;
+    setState((prev) => ({ ...prev, replay: { ...(prev.replay || {}), ...status }, mode: 'replay' }));
+  }, []);
 
   useEffect(() => {
     const socket = io({ path: '/socket.io', transports: ['websocket', 'polling'] });
+    socketRef.current = socket;
 
     socket.on('connect', () => setState((prev) => ({ ...prev, socketConnected: true })));
     socket.on('disconnect', () => setState((prev) => ({ ...prev, socketConnected: false })));
 
     socket.on('market:snapshot', (payload) => {
-      const quotes = {};
-      for (const quote of payload.quotes || []) quotes[quote.stockId] = quote;
-      setState((prev) => ({
-        ...prev,
-        mode: payload.mode || prev.mode,
-        quotes,
-        indices: payload.indices || prev.indices,
-        marketStatus: payload.marketStatus || prev.marketStatus,
-        freshness: payload.freshness || prev.freshness,
-        subscription: payload.subscription || prev.subscription,
-        lastUpdate: new Date().toISOString()
-      }));
+      setState((prev) => {
+        const activeSession = payload.replay?.sessionId ?? replaySessionRef.current;
+        // A snapshot for a different replay session replaces the quote cache instead
+        // of being merged into it.
+        const sessionChanged = Boolean(
+          payload.replay?.sessionId && prev.replay?.sessionId && payload.replay.sessionId !== prev.replay.sessionId
+        );
+        const quotes = sessionChanged ? {} : { ...prev.quotes };
+        for (const quote of payload.quotes || []) {
+          quotes[quote.stockId] = mergeQuote(sessionChanged ? null : quotes[quote.stockId], quote, activeSession);
+        }
+        return {
+          ...prev,
+          mode: payload.mode || prev.mode,
+          quotes,
+          indices: payload.indices || prev.indices,
+          marketStatus: payload.marketStatus || prev.marketStatus,
+          freshness: payload.freshness || prev.freshness,
+          subscription: payload.subscription || prev.subscription,
+          replay: payload.replay ?? prev.replay,
+          lastUpdate: new Date().toISOString()
+        };
+      });
     });
 
-    socket.on('market:update', ({ quotes = [] }) => {
+    socket.on('market:update', ({ quotes = [], replay }) => {
       if (!quotes.length) return;
+      const activeSession = replay?.sessionId ?? replaySessionRef.current;
       setState((prev) => {
         const next = { ...prev.quotes };
-        for (const quote of quotes) next[quote.stockId] = quote;
-        return { ...prev, quotes: next, lastUpdate: new Date().toISOString() };
+        for (const quote of quotes) {
+          const merged = mergeQuote(next[quote.stockId], quote, activeSession);
+          if (merged) next[quote.stockId] = merged;
+        }
+        return {
+          ...prev,
+          quotes: next,
+          replay: replay ? { ...(prev.replay || {}), ...replay } : prev.replay,
+          lastUpdate: new Date().toISOString()
+        };
       });
+
+      // Receipt acknowledgement: the backend cannot assume a browser applied a
+      // broadcast, so clients report the last event they actually received.
+      if (replay?.sessionId) {
+        const now = Date.now();
+        if (now - lastReportRef.current > 1000) {
+          lastReportRef.current = now;
+          socket.emit('replay:client-report', { lastEventId: replay.lastEventId ?? null });
+        }
+      }
     });
 
     socket.on('market:status', ({ status, freshness, mode, subscription }) =>
@@ -96,8 +137,26 @@ export function MarketProvider({ children }) {
       setState((prev) => ({ ...prev, events: [event, ...prev.events].slice(0, 40) }))
     );
 
-    return () => socket.disconnect();
-  }, []);
+    socket.on('replay:status', applyReplay);
+    socket.on('replay:loaded', applyReplay);
+    socket.on('replay:started', applyReplay);
+    socket.on('replay:paused', applyReplay);
+    socket.on('replay:resumed', applyReplay);
+    socket.on('replay:completed', applyReplay);
+    socket.on('replay:error', applyReplay);
+
+    socket.on('replay:reset', (payload) => {
+      // A reset invalidates the cached quotes: they belong to a playback position
+      // that no longer exists.
+      replaySessionRef.current = payload?.sessionId ?? replaySessionRef.current;
+      setState((prev) => ({ ...prev, quotes: {}, replay: payload ? { ...prev.replay, ...payload } : prev.replay }));
+    });
+
+    return () => {
+      socket.disconnect();
+      socketRef.current = null;
+    };
+  }, [applyReplay]);
 
   // Reconciliation poll. Served from the backend cache; never one request per stock.
   useEffect(() => {
@@ -126,14 +185,13 @@ export function MarketProvider({ children }) {
         }
 
         setState((prev) => {
-          const quotes = { ...prev.quotes };
+          const activeSession = snapshot.replay?.sessionId ?? replaySessionRef.current;
+          const sessionChanged = Boolean(
+            snapshot.replay?.sessionId && prev.replay?.sessionId && snapshot.replay.sessionId !== prev.replay.sessionId
+          );
+          const quotes = sessionChanged ? {} : { ...prev.quotes };
           for (const stock of snapshot.stocks || []) {
-            const existing = quotes[stock.id];
-            // Keep whichever observation is newer so a snapshot response cannot
-            // overwrite a tick that arrived while the request was in flight.
-            if (existing && !newer(stock.receivedAt, existing.updatedAt)) continue;
-            quotes[stock.id] = {
-              ...(existing || {}),
+            const incoming = {
               stockId: stock.id,
               symbol: stock.symbol,
               companyName: stock.companyName,
@@ -149,9 +207,12 @@ export function MarketProvider({ children }) {
               tradedAt: stock.lastTradeTime,
               receivedAt: stock.receivedAt,
               updatedAt: stock.receivedAt,
+              candleAt: stock.candleAt ?? null,
+              sessionId: stock.sessionId ?? null,
               stale: stock.dataStatus === 'STALE',
               dataStatus: stock.dataStatus
             };
+            quotes[stock.id] = mergeQuote(sessionChanged ? null : quotes[stock.id], incoming, activeSession);
           }
 
           return {
@@ -166,6 +227,7 @@ export function MarketProvider({ children }) {
             marketStatus: snapshot.marketStatus || prev.marketStatus,
             freshness: { ...(prev.freshness || {}), lastMessageAt: snapshot.lastFeedMessageAt },
             indices: snapshot.indices || prev.indices,
+            replay: snapshot.replay ?? prev.replay,
             quotes,
             lastSnapshotAt: new Date().toISOString(),
             snapshotRefreshMs: delay
@@ -185,7 +247,32 @@ export function MarketProvider({ children }) {
     };
   }, []);
 
-  const value = useMemo(() => state, [state]);
+  const runReplayCommand = useCallback(
+    async (command) => {
+      const status = await command();
+      applyReplay(status);
+      return status;
+    },
+    [applyReplay]
+  );
+
+  const replayActions = useMemo(
+    () => ({
+      load: (sessionId) => runReplayCommand(() => api.replayLoad(sessionId)),
+      play: (speed) => runReplayCommand(() => api.replayPlay(speed)),
+      pause: () => runReplayCommand(() => api.replayPause()),
+      reset: () => runReplayCommand(() => api.replayReset()),
+      setSpeed: (speed) => runReplayCommand(() => api.replaySpeed(speed)),
+      refresh: async () => {
+        const status = await api.replayStatus();
+        applyReplay(status);
+        return status;
+      }
+    }),
+    [runReplayCommand, applyReplay]
+  );
+
+  const value = useMemo(() => ({ ...state, replayActions }), [state, replayActions]);
   return <MarketContext.Provider value={value}>{children}</MarketContext.Provider>;
 }
 

@@ -1,3 +1,5 @@
+// Replay control API. The backend is the only authority on replay state; these calls
+// send commands and return the resulting state.
 const BASE = '/api';
 
 async function request(path, options = {}) {
@@ -33,6 +35,8 @@ const qs = (params) => {
   return query ? `?${query}` : '';
 };
 
+const post = (path, body) => request(path, { method: 'POST', body: JSON.stringify(body ?? {}) });
+
 export const api = {
   overview: () => request('/market/overview'),
   heatmap: ({ range = 'daily', sector = 'all', sizeBy = 'marketCap' } = {}) =>
@@ -61,9 +65,18 @@ export const api = {
   recentEvents: (minutes = 360) => request(`/events/recent${qs({ minutes })}`),
 
   watchlists: () => request('/watchlists'),
-  createWatchlist: (name) => request('/watchlists', { method: 'POST', body: JSON.stringify({ name }) }),
-  addToWatchlist: (id, stockId) =>
-    request(`/watchlists/${id}/stocks`, { method: 'POST', body: JSON.stringify({ stockId }) }),
+  createWatchlist: (name) => post('/watchlists', { name }),
+  addToWatchlist: (id, stockId) => post(`/watchlists/${id}/stocks`, { stockId }),
   removeFromWatchlist: (id, stockId) =>
-    request(`/watchlists/${id}/stocks/${stockId}`, { method: 'DELETE' })
+    request(`/watchlists/${id}/stocks/${stockId}`, { method: 'DELETE' }),
+
+  // Replay
+  replaySessions: () => request('/replay/sessions'),
+  replayStatus: () => request('/replay/status'),
+  replayDiagnostics: () => request('/replay/diagnostics'),
+  replayLoad: (sessionId) => post('/replay/load', { sessionId }),
+  replayPlay: (speed) => post('/replay/play', speed === undefined ? {} : { speed }),
+  replayPause: () => post('/replay/pause'),
+  replayReset: () => post('/replay/reset'),
+  replaySpeed: (speed) => post('/replay/speed', { speed })
 };

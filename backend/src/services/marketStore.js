@@ -69,10 +69,35 @@ class MarketStore extends EventEmitter {
       messages: 0,
       ticksAccepted: 0,
       ticksRejected: 0,
-      decodeErrors: 0
+      decodeErrors: 0,
+      // Broadcast/receipt instrumentation. `io.emit()` is not proof a browser
+      // rendered anything, so frontend receipts are counted separately.
+      broadcastBatches: 0,
+      broadcastQuotes: 0,
+      socketClients: 0,
+      frontendReportClients: 0,
+      lastFrontendReportAt: null
     };
     this.marketInfo = { segmentStatus: {}, observedAt: null, source: null };
+    // Replay metadata published by the replay engine (null outside REPLAY mode).
+    this.replay = null;
     this.startedAt = new Date();
+  }
+
+  /**
+   * Simulated market clock in epoch milliseconds. Everything time-relative in a
+   * replay (intraday baselines, freshness, market status) must use it instead of the
+   * wall clock, otherwise a 10x replay would report a 10x-compressed "5 minutes".
+   */
+  nowTs() {
+    const clock = this.replay?.clock;
+    const parsed = clock ? new Date(clock).getTime() : Number.NaN;
+    return Number.isFinite(parsed) ? parsed : Date.now();
+  }
+
+  setReplayState(replay) {
+    this.replay = replay;
+    this.emit('replay:state', replay);
   }
 
   registerStocks(rows) {
@@ -122,7 +147,14 @@ class MarketStore extends EventEmitter {
       receivedAt: null,
       updatedAt: null,
       stale: true,
-      sources: 0
+      sources: 0,
+      // Set for replayed observations only: the historical timestamp used for candle
+      // buckets and the simulated clock, never the wall clock.
+      candleAt: null,
+      providerTimestamp: null,
+      sourceGranularity: null,
+      sessionId: null,
+      eventId: null
     };
   }
 
@@ -176,6 +208,21 @@ class MarketStore extends EventEmitter {
     }
 
     const previous = this.quotes.get(stock.id);
+    // Replay events are ordered by historical time and carry deterministic IDs.
+    // Enforce that contract at the store boundary as well, so a delayed or
+    // duplicated event cannot roll the dashboard back after reset/reconnect.
+    if (tick.sessionId && previous?.sessionId === tick.sessionId) {
+      if (tick.eventId && previous.eventId === tick.eventId) {
+        this.stats.ticksRejected += 1;
+        return false;
+      }
+      const incomingTs = tick.providerTimestamp ? new Date(tick.providerTimestamp).getTime() : null;
+      const previousTs = previous.providerTimestamp ? new Date(previous.providerTimestamp).getTime() : null;
+      if (Number.isFinite(incomingTs) && Number.isFinite(previousTs) && incomingTs < previousTs) {
+        this.stats.ticksRejected += 1;
+        return false;
+      }
+    }
     const previousClose = tick.previousClose ?? previous?.previousClose ?? null;
     const changePct = percentChange(tick.lastPrice, previousClose);
     const changeAbs = changePct === null ? null : tick.lastPrice - previousClose;
@@ -197,7 +244,14 @@ class MarketStore extends EventEmitter {
       receivedAt,
       updatedAt: receivedAt,
       stale: false,
-      sources: (previous?.sources || 0) + 1
+      sources: (previous?.sources || 0) + 1,
+      // Replay provenance travels with the quote so the UI can reject events from a
+      // previous session instead of silently applying them.
+      candleAt: tick.candleAt ?? null,
+      providerTimestamp: tick.providerTimestamp ?? null,
+      sourceGranularity: tick.sourceGranularity ?? null,
+      sessionId: tick.sessionId ?? null,
+      eventId: tick.eventId ?? null
     };
 
     this.quotes.set(stock.id, quote);
@@ -210,7 +264,13 @@ class MarketStore extends EventEmitter {
     }
 
     const points = this.history.get(stock.id) || [];
-    points.push({ ts: receivedAt.getTime(), price: tick.lastPrice, volume: quote.volume });
+    // Replayed points are stamped with the historical time so range comparisons use
+    // the simulated clock rather than the wall clock.
+    points.push({
+      ts: (tick.candleAt ? new Date(tick.candleAt) : receivedAt).getTime(),
+      price: tick.lastPrice,
+      volume: quote.volume
+    });
     if (points.length > MAX_HISTORY_POINTS) points.splice(0, points.length - MAX_HISTORY_POINTS);
     this.history.set(stock.id, points);
 
@@ -276,6 +336,20 @@ class MarketStore extends EventEmitter {
     this.stats.decodeErrors += 1;
   }
 
+  recordBroadcast(quoteCount) {
+    this.stats.broadcastBatches += 1;
+    this.stats.broadcastQuotes += quoteCount;
+  }
+
+  recordSocketClients(count) {
+    this.stats.socketClients = count;
+  }
+
+  recordFrontendReport(clientCount) {
+    this.stats.frontendReportClients = clientCount;
+    this.stats.lastFrontendReportAt = new Date().toISOString();
+  }
+
   recordRejectedTick() {
     this.stats.ticksRejected += 1;
   }
@@ -309,18 +383,22 @@ class MarketStore extends EventEmitter {
   }
 
   /** Data status for one quote, derived from message timestamps, never price equality. */
-  getDataStatus(quote, now = Date.now()) {
+  getDataStatus(quote, now = this.nowTs()) {
     if (!quote || quote.price === null || quote.price === undefined) return DATA_STATUS.UNAVAILABLE;
     const last = quote.updatedAt ?? quote.receivedAt;
     if (!last) return DATA_STATUS.UNAVAILABLE;
     if (!this.getMarketStatus().isOpen) return DATA_STATUS.CLOSED;
-    return now - new Date(last).getTime() <= config.live.staleThresholdMs
-      ? DATA_STATUS.FRESH
-      : DATA_STATUS.STALE;
+    // In a replay the observation is current when the simulated clock is close to the
+    // historical timestamp it came from; the wall-clock age of the last event would
+    // mark every tile stale as soon as playback is paused.
+    const observedAt = quote.candleAt ? new Date(quote.candleAt).getTime() : new Date(last).getTime();
+    return now - observedAt <= config.live.staleThresholdMs ? DATA_STATUS.FRESH : DATA_STATUS.STALE;
   }
 
   /** Recomputes the coarse `stale` flag after the freshness window elapses. */
   markStale(now = Date.now()) {
+    // Replay freshness is measured on the simulated clock, which stops when paused.
+    if (this.connection.mode === 'replay') return false;
     let changed = false;
     for (const [id, quote] of this.quotes) {
       if (!quote.updatedAt) continue;
@@ -345,7 +423,7 @@ class MarketStore extends EventEmitter {
   }
 
   /** Compact payload pushed to clients; never claims freshness it cannot prove. */
-  snapshot(now = Date.now()) {
+  snapshot(now = this.nowTs()) {
     const quotes = this.listQuotes().map((quote) => ({
       ...quote,
       dataStatus: this.getDataStatus(quote, now)
@@ -359,12 +437,31 @@ class MarketStore extends EventEmitter {
       freshness: this.getFreshness(),
       quotes,
       indices: this.getIndices(),
-      serverTime: new Date(now).toISOString(),
+      replay: this.replay,
+      serverTime: new Date().toISOString(),
+      simulatedTime: new Date(now).toISOString(),
       snapshotRefreshMs: config.live.snapshotRefreshMs
     };
   }
 
-  getSubscriptionSummary(now = Date.now()) {
+  /**
+   * Clears everything replay-derived before a new session starts: cached quotes,
+   * intraday history and counters. Stored history is never touched here.
+   */
+  resetReplayState() {
+    for (const stock of this.stocksById.values()) {
+      this.quotes.set(stock.id, this.emptyQuote(stock));
+      this.history.set(stock.id, []);
+    }
+    this.indices.clear();
+    this.stats.messages = 0;
+    this.stats.ticksAccepted = 0;
+    this.stats.ticksRejected = 0;
+    this.stats.decodeErrors = 0;
+    this.connection.lastMessageAt = null;
+  }
+
+  getSubscriptionSummary(now = this.nowTs()) {
     const total = this.stocksById.size;
     const receiving = this.listQuotes().filter(
       (quote) => this.getDataStatus(quote, now) === DATA_STATUS.FRESH
@@ -377,6 +474,24 @@ class MarketStore extends EventEmitter {
   }
 
   getMarketStatus() {
+    // A replayed session's open/closed status belongs to the historical date, never
+    // to the current wall clock (spec 18.4).
+    if (this.connection.mode === 'replay' && this.replay?.clock) {
+      const at = new Date(this.replay.clock);
+      const ist = new Date(at.getTime() + 5.5 * 3600 * 1000);
+      const day = ist.getUTCDay();
+      const minutes = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+      const open = day >= 1 && day <= 5 && minutes >= 555 && minutes <= 930;
+      return {
+        isOpen: open,
+        label: open ? 'Session open (replay)' : 'Session closed (replay)',
+        source: 'replay-clock',
+        tradingDate: this.replay.tradingDate ?? null,
+        providerSegmentStatus: null,
+        observedAt: this.replay.clock
+      };
+    }
+
     const segmentStatus = this.marketInfo.segmentStatus?.NSE_EQ;
     // The provider's segment status is authoritative when we have one.
     if (segmentStatus) {
@@ -418,13 +533,19 @@ class MarketStore extends EventEmitter {
 
   /** Feed + instrument health, used to locate faults (credentials/subscribe/decode/UI). */
   getDiagnostics() {
-    const now = Date.now();
+    const now = this.nowTs();
     const quotes = this.listQuotes();
     const updates = this.getInstrumentUpdates();
     const statuses = quotes.map((quote) => this.getDataStatus(quote, now));
+    const provider =
+      this.connection.mode === 'live'
+        ? 'upstox-v3'
+        : this.connection.mode === 'replay'
+          ? 'historical-replay'
+          : 'demo-simulation';
     return {
       mode: this.connection.mode,
-      provider: this.connection.mode === 'live' ? 'upstox-v3' : 'demo-simulation',
+      provider,
       connection: this.connection.state,
       connected: this.connection.connected,
       error: this.connection.error,

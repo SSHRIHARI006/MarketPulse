@@ -64,7 +64,7 @@ cd frontend && npm install && npm run dev
 
 ---
 
-## LIVE vs DEMO mode
+## Data modes
 
 `MARKET_DATA_MODE` selects the data source and the UI always shows which one is active.
 
@@ -72,6 +72,11 @@ cd frontend && npm install && npm run dev
   analytics are genuinely computed, but the data is synthetic. The UI shows a DEMO
   badge and a banner stating that values are simulated. Indices are derived from the
   weighted move of the tracked stocks.
+- **`replay`** — streams previously stored one-minute bars back through the pipeline in
+  chronological order, at 1x/2x/5x/10x, with play/pause/reset and a simulated market
+  clock. Nothing is generated: every emitted price is a stored observation, tagged with
+  its original timestamp. The UI shows a REPLAY badge, `SIMULATED LIVE · HISTORICAL
+  DATA REPLAY`, the trading date and the simulated time. No provider token is needed.
 - **`live`** — connects to the Upstox Market Data Feed V3. Requires
   `UPSTOX_ACCESS_TOKEN`. The adapter authorises the feed, subscribes to **all 50
   constituents plus the index instruments** in `full` mode (batched requests), decodes
@@ -117,6 +122,92 @@ no new trades occur — the platform does not simulate movement in LIVE mode.
   `LIVE_STALE_THRESHOLD_MS` (default 15000) controls when a quote becomes `STALE`.
   Freshness uses message timestamps, not price equality, so an unchanged price is not
   marked stale merely because it did not move.
+
+---
+
+## Historical replay
+
+```bash
+# .env
+MARKET_DATA_MODE=replay
+```
+
+Docker Compose and a local `npm start` both honour it; `backend/src/replay/` contains
+the whole subsystem.
+
+```text
+stock_candles (1m, source='demo')     →  dataset.loadSession()   (validate, order, reject)
+                                              │
+                                              ▼
+                                       replay engine            (cursor + elapsed-time scheduler)
+                                              │  batches, chronological
+                                              ▼
+                              sanitizeTick() → processTick()    (the LIVE/DEMO pipeline)
+                                              │
+                     ┌────────────────────────┴────────────────────────┐
+                     ▼                                                 ▼
+              candle aggregator (bucketed by the historical minute)   Socket.IO
+                     │                                                 │
+                     ▼                                                 ▼
+                 analytics                                   React context → dashboard
+```
+
+### Historical data audit (Stage 0 deliverable)
+
+Measured against the running database, not assumed:
+
+| Field | Finding |
+|---|---|
+| Data source | PostgreSQL `stock_candles` (`interval='1m'`, `source='demo'`) |
+| Granularity | One-minute OHLCV bars (`ONE_MINUTE_CANDLE`) — there is no tick-level history |
+| Price fields | open, high, low, close, volume per minute (volume is per-bar, accumulated into session volume by the pipeline) |
+| Trading dates | 2026-10-30, 2026-11-02, 2026-11-03 (IST) |
+| Instruments | 13–50 of the 50 tracked stocks, depending on the session |
+| Coverage | 2026-11-03 50/50 · 2026-11-02 13/50 · 2026-10-30 13/50 |
+| Event count | 17,944 · 5,640 · 5,625 usable bars respectively |
+| Timestamps | Stored as `timestamptz`, validated and re-sorted on load |
+| Missing data | Older sessions predate the 50-stock expansion; indexes have no stored history |
+| Data-quality issues | Two retired constituents hold bars (reported as `UNKNOWN_INSTRUMENT`), and the DEMO simulator writes bars outside 09:15–15:30 IST, which are excluded from a session |
+
+The dataset sustains the demonstration: one session covers the full universe with a
+complete trading day at minute granularity.
+
+### Controls and API
+
+```http
+GET  /api/replay/sessions      # available sessions + real coverage
+POST /api/replay/load          # { "sessionId": "2026-11-03" }
+POST /api/replay/play          # { "speed": 5 }
+POST /api/replay/pause
+POST /api/replay/reset
+POST /api/replay/speed         # { "speed": 10 }
+GET  /api/replay/status
+GET  /api/replay/diagnostics
+```
+
+Allowed speeds are 1x, 2x, 5x, 10x; anything else is rejected with `400`. Conflicting
+transitions (playing a completed or empty session) return `409`. The dashboard shows
+all controls; `/diagnostics` shows the pipeline stage by stage.
+
+### Behaviour worth knowing
+
+- **Backend-authoritative.** The browser never runs its own scheduler; it sends
+  commands and renders the state returned by the engine. One shared session exists for
+  the whole backend, so every connected client observes the same play/pause/speed/reset
+  (spec 16.4).
+- **Timing.** Scheduling is elapsed-time based (`anchorWall + (eventTs − anchor) / speed`),
+  so late timers do not accumulate drift and a speed change rebases without moving the
+  cursor.
+- **Provenance.** Replay writes candles with `source = 'replay'` and deletes only those
+  on reset; the dataset it reads (`source = 'demo'`) is never modified. Tick sampling is
+  disabled in replay because a replayed price has no meaningful wall-clock tick time.
+- **Timestamps.** Each event keeps its historical timestamp; `receivedAt`/`updatedAt`
+  record actual processing time. Freshness, intraday baselines and market status are all
+  evaluated on the simulated clock, so a paused replay freezes instead of going stale,
+  and a 10x replay does not compress "last 5 minutes" to 30 seconds.
+- **Session isolation.** Every quote carries its replay `sessionId`; the frontend merge
+  (`frontend/src/lib/quoteMerge.js`) drops observations from a superseded session, so a
+  delayed batch from the previous session cannot corrupt the new one.
 
 ---
 
@@ -194,6 +285,9 @@ docker-compose.yml frontend + backend + PostgreSQL
 | GET | `/api/analytics/intelligence` | All rankings in one payload |
 | GET | `/api/events`, `/api/events/recent` | Event history |
 | GET/POST | `/api/watchlists`, `/:id/stocks` | Watchlist CRUD |
+| GET | `/api/replay/sessions` | Historical sessions with real coverage |
+| POST | `/api/replay/load`, `/play`, `/pause`, `/reset`, `/speed` | Replay controls |
+| GET | `/api/replay/status`, `/api/replay/diagnostics` | Replay state and pipeline trace |
 
 `range` accepts `daily`, `session`, `5m`, `15m`, `1h`. `sizeBy` accepts `marketCap`,
 `volume`, `equal`.
@@ -205,7 +299,15 @@ Server → client: `market:snapshot` (sent first), `market:update`, `heatmap:upd
 `subscription`). `market:update` and `heatmap:update` carry a server-computed
 `dataStatus` per quote. One shared Socket.IO connection serves the whole app; quote
 updates are batched every 250 ms.
-Client → server: `heatmap:subscribe`, `heatmap:unsubscribe`.
+
+In REPLAY mode the same market events are reused, extended with a `replay` block
+(`sessionId`, `tradingDate`, `state`, `clock`, `speed`), plus `replay:status` (throttled
+to the 250 ms batch) and the lifecycle events `replay:loading`, `replay:loaded`,
+`replay:started`, `replay:paused`, `replay:resumed`, `replay:completed`, `replay:error`
+and `replay:reset` (which is followed by a fresh `market:snapshot`).
+Client → server: `heatmap:subscribe`, `heatmap:unsubscribe`, `replay:client-report`
+(per-client receipt acknowledgement; the backend counts those separately from
+`io.emit`, which is not proof that a browser rendered anything).
 
 ---
 
@@ -228,9 +330,11 @@ Client → server: `heatmap:subscribe`, `heatmap:unsubscribe`.
 ## Data storage
 
 - Every observation row (`market_ticks`, `stock_candles`, `stock_reference`) carries a
-  `source` of `demo` or `live`. Analytics and charts query only the active mode's
-  source, and demo history is never seeded in LIVE mode, so simulated and real data
-  can never be compared as one series.
+  `source` of `demo`, `live` or `replay`. Analytics and charts query only the active
+  mode's source, and demo history is never seeded in LIVE mode, so simulated and real
+  data can never be compared as one series. A replay writes under `replay` while
+  reading the dataset it was configured with (`REPLAY_DATASET_SOURCE`), so it never
+  alters its own source.
 - `market_ticks` is sampled (one observation per stock per `TICK_SAMPLE_INTERVAL_MS`),
   not every tick, with a retention sweep (`TICK_RETENTION_HOURS`).
 - `stock_candles` stores 1m buckets written by the aggregator plus 5m/15m rollups and
@@ -252,7 +356,14 @@ colliding and unchanged mappings), feed lifecycle states, timestamp-based freshn
 snapshots that include untraded stocks without fabricating prices, diagnostics counters
 and DEMO coverage for every constituent.
 
+Phase 3 adds 16 backend tests (dataset normalisation and rejection reasons, chronological
+ordering, duplicate/identical timestamps, caps, all engine transitions and timing at
+1x/2x/5x/10x, reset, session switching, and the pipeline's historical timestamp handling
+for quotes and candles) and 8 frontend tests for the quote-merge policy used by both the
+snapshot and socket paths.
+
 ```bash
+cd frontend && npm test        # merge policy: ordering, duplicates, session guard
 cd frontend && npm run build   # production build check
 ```
 
@@ -274,3 +385,13 @@ cd frontend && npm run build   # production build check
 - Watchlists are shared by a single demo account; authentication is an optional later
   milestone.
 - Demo mode is a simulation and is labelled as such everywhere it appears.
+- Replay is one-minute candle replay, not tick replay: the stored dataset has no
+  individual trades, so no trades are invented. Each tile moves once per replayed
+  minute, which is why 5x/10x feel closer to a live feed.
+- The dataset has no index history, so the NIFTY 50 / SENSEX cards read “awaiting index
+  data” during replay instead of showing a computed or carried-over level.
+- Only sessions stored in `stock_candles` are replayable. Sessions with partial
+  coverage (13/50 for the older dates) are listed with their real coverage and the
+  missing instruments stay unavailable rather than being filled in.
+- One shared replay session exists per backend; per-client playback and replaying a
+  hand-picked subset of instruments are not implemented.

@@ -1,5 +1,5 @@
 import { query } from '../config/database.js';
-import { config, dataSource } from '../config/env.js';
+import { config, historySource } from '../config/env.js';
 import { marketStore } from './marketStore.js';
 import {
   annualisedVolatility,
@@ -27,8 +27,9 @@ export async function loadFrame({ force = false } = {}) {
   if (!force && fresh && frameCache.promise) return frameCache.promise;
 
   // Analytics only ever compare observations from the active data mode, so demo
-  // history cannot leak into LIVE rankings (and vice versa).
-  const source = dataSource();
+  // history cannot leak into LIVE rankings (and vice versa). A replay reads the
+  // dataset it is replaying.
+  const source = historySource();
 
   const promise = (async () => {
     const [stocks, daily, intraday, references] = await Promise.all([
@@ -52,7 +53,9 @@ export async function loadFrame({ force = false } = {}) {
          FROM stock_candles
          WHERE interval = '1m' AND candle_start >= $1 AND source = $2
          ORDER BY stock_id, candle_start`,
-        [latestSessionStart(new Date()).toISOString(), source]
+        // The simulated clock, not the wall clock, decides which session's intraday
+        // bars belong to a replay.
+        [latestSessionStart(new Date(marketStore.nowTs())).toISOString(), source]
       ),
       query('SELECT stock_id, high_52w, low_52w, avg_daily_vol FROM stock_reference WHERE source = $1', [source])
     ]);
@@ -494,7 +497,7 @@ export async function getStockAnalytics(stockId) {
     `SELECT close FROM stock_candles
      WHERE stock_id = $1 AND interval = '1d' AND source = $2
      ORDER BY candle_start`,
-    [id, dataSource()]
+    [id, historySource()]
   )).rows.map((row) => Number(row.close));
 
   return {
@@ -536,7 +539,7 @@ export async function getStockHistory(stockId, { interval = '5m', limit = 200 } 
      WHERE stock_id = $1 AND interval = $2 AND source = $4
      ORDER BY candle_start DESC
      LIMIT $3`,
-    [id, interval, capped, dataSource()]
+    [id, interval, capped, historySource()]
   );
 
   const candles = rows

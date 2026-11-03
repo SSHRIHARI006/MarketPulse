@@ -4,6 +4,18 @@ import { cx, fmtTime } from '../lib/format';
 
 function ModeBadge({ mode }) {
   const live = mode === 'live';
+  const replay = mode === 'replay';
+  if (replay) {
+    return (
+      <span
+        className="inline-flex items-center gap-1.5 rounded-full border border-violet-500/40 bg-violet-500/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-violet-300"
+        title="Replay mode: historical observations streamed from a stored dataset. Not live market data."
+      >
+        <span className="h-1.5 w-1.5 rounded-full bg-violet-400" />
+        Replay
+      </span>
+    );
+  }
   return (
     <span
       className={cx(
@@ -35,7 +47,34 @@ const CONNECTION_VIEW = {
   DISCONNECTED: { label: 'Disconnected', tone: 'muted' }
 };
 
-function ConnectionPill({ market, socketConnected }) {
+function ConnectionPill({ market, socketConnected, replay }) {
+  // In REPLAY mode the meaningful state is the replay engine's, not a feed state:
+  // there is no provider connection to report.
+  if (replay) {
+    const tone =
+      replay.state === 'PLAYING'
+        ? 'border-emerald-700/60 text-emerald-300'
+        : replay.state === 'PAUSED'
+          ? 'border-amber-700/60 text-amber-400'
+          : replay.state === 'ERROR'
+            ? 'border-rose-700/60 text-rose-300'
+            : 'border-violet-700/60 text-violet-300';
+    return (
+      <span
+        className={cx('hidden items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-medium sm:inline-flex', tone)}
+        title="Backend replay state. Playback is shared by every connected client."
+      >
+        <span
+          className={cx(
+            'h-1.5 w-1.5 rounded-full',
+            replay.state === 'PLAYING' ? 'bg-emerald-400 live-dot' : replay.state === 'PAUSED' ? 'bg-amber-400' : 'bg-violet-400'
+          )}
+        />
+        Replay · {replay.state || 'IDLE'}
+      </span>
+    );
+  }
+
   const feedState = market.connection?.state || 'DISCONNECTED';
   const view = !socketConnected
     ? { label: 'Reconnecting to server', tone: 'error' }
@@ -86,9 +125,10 @@ const navLink = ({ isActive }) =>
   );
 
 export default function Layout() {
-  const { mode, socketConnected, marketStatus, freshness, ...market } = useMarket();
+  const { mode, socketConnected, marketStatus, freshness, replay, ...market } = useMarket();
   const lastMessage = freshness?.lastMessageAt;
   const stale = marketStatus?.isOpen && (freshness?.stale ?? true);
+  const isReplay = mode === 'replay';
 
   return (
     <div className="flex min-h-screen flex-col bg-ink-950">
@@ -115,6 +155,9 @@ export default function Layout() {
             <NavLink to="/watchlist" className={navLink}>
               Watchlist
             </NavLink>
+            <NavLink to="/diagnostics" className={navLink}>
+              Diagnostics
+            </NavLink>
           </nav>
 
           <div className="ml-auto flex flex-wrap items-center gap-2.5">
@@ -125,12 +168,22 @@ export default function Layout() {
               />
               {marketStatus?.label || 'Market status unavailable'}
             </span>
-            <ConnectionPill market={market} socketConnected={socketConnected} />
+            <ConnectionPill market={market} socketConnected={socketConnected} replay={replay} />
             <span
-              className={cx('hidden text-[10px] lg:inline', stale ? 'text-amber-400' : 'text-slate-500')}
-              title="Timestamp of the last valid feed message"
+              className={cx('hidden text-[10px] lg:inline', stale && !isReplay ? 'text-amber-400' : 'text-slate-500')}
+              title={
+                isReplay
+                  ? 'Simulated market time of the replayed historical session'
+                  : 'Timestamp of the last valid feed message'
+              }
             >
-              {lastMessage ? `Last feed message ${fmtTime(lastMessage)} IST` : 'No feed message yet'}
+              {isReplay
+                ? replay?.clock
+                  ? `Simulated ${fmtTime(replay.clock)} IST · ${replay.tradingDate}`
+                  : 'Replay session not loaded'
+                : lastMessage
+                  ? `Last feed message ${fmtTime(lastMessage)} IST`
+                  : 'No feed message yet'}
             </span>
           </div>
         </div>
@@ -149,7 +202,9 @@ export default function Layout() {
           <p>
             {mode === 'demo'
               ? 'Demo mode: all values are simulated and clearly labelled.'
-              : 'Live mode: data from the market data provider.'}
+              : mode === 'replay'
+                ? 'Replay mode: historical observations, dated and labelled as such.'
+                : 'Live mode: data from the market data provider.'}
           </p>
         </div>
       </footer>

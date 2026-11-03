@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { createApp } from './app.js';
-import { config, isDemoMode } from './config/env.js';
+import { config, isDemoMode, isReplayMode } from './config/env.js';
 import { closePool, ensureSchema, waitForDatabase } from './config/database.js';
 import { seedHistoryIfEmpty, rollupCandles } from './db/seedHistory.js';
 import { startMarketData, stopMarketData } from './services/marketData.service.js';
@@ -16,9 +16,10 @@ async function bootstrap() {
   await waitForDatabase();
   await ensureSchema();
 
-  // Synthetic history is DEMO-only. LIVE mode must not inherit it, otherwise
-  // rankings and 52-week metrics would mix simulated and real observations.
-  if (isDemoMode()) {
+  // Synthetic history belongs to the DEMO dataset. REPLAY reads that dataset, so a
+  // fresh install needs it present; LIVE must never inherit it, otherwise rankings
+  // and 52-week metrics would mix simulated and real observations.
+  if (isDemoMode() || isReplayMode()) {
     await seedHistoryIfEmpty();
   } else {
     console.log('[boot] LIVE mode: demo history is not seeded; history starts from live observations');
@@ -32,7 +33,9 @@ async function bootstrap() {
   await new Promise((resolve) => server.listen(config.port, resolve));
   console.log(`[boot] API listening on http://localhost:${config.port}`);
 
-  startMarketCollector();
+  // The collector persists a wall-clock sample of the feed. Replayed events carry
+  // historical timestamps, so sampling them would insert misleading tick rows.
+  if (!isReplayMode()) startMarketCollector();
   startCandleAggregator();
   startEventDetection();
 

@@ -19,7 +19,8 @@ export const config = {
     process.env.DATABASE_URL ||
     'postgresql://marketpulse:marketpulse@localhost:5432/marketpulse',
 
-  // 'live' connects to Upstox; anything else runs the clearly labelled demo feed.
+  // 'live' connects to Upstox, 'replay' streams stored historical bars, 'demo'
+  // runs the clearly labelled simulator. Every mode tags what it writes.
   marketDataMode: (process.env.MARKET_DATA_MODE || 'demo').trim().toLowerCase(),
   upstox: {
     accessToken: process.env.UPSTOX_ACCESS_TOKEN || '',
@@ -52,6 +53,21 @@ export const config = {
   demo: {
     tickIntervalMs: num(process.env.DEMO_TICK_INTERVAL_MS, 1500),
     historyDays: num(process.env.SEED_HISTORY_DAYS, 260)
+  },
+
+  // Historical replay. The dataset is read-only; replayed candles are written under
+  // their own provenance so a replay can never alter the source it reads.
+  replay: {
+    // Provenance of the stored dataset that is replayed ('demo' history by default).
+    datasetSource: (process.env.REPLAY_DATASET_SOURCE || 'demo').trim().toLowerCase(),
+    // Session to load at start-up (YYYY-MM-DD, IST). Empty = most recent available.
+    defaultSession: (process.env.REPLAY_SESSION || '').trim(),
+    defaultSpeed: num(process.env.REPLAY_SPEED, 1),
+    speeds: [1, 2, 5, 10],
+    // Upper bound on how many historical events a single session may load.
+    maxEvents: num(process.env.REPLAY_MAX_EVENTS, 200000),
+    // Events emitted per scheduling wake before yielding to the event loop.
+    maxBatchEvents: num(process.env.REPLAY_MAX_BATCH_EVENTS, 500)
   },
 
   // Analysis windows.
@@ -88,10 +104,18 @@ export const config = {
   ]
 };
 
-export const isDemoMode = () => config.marketDataMode !== 'live';
+export const isDemoMode = () => config.marketDataMode === 'demo';
+export const isReplayMode = () => config.marketDataMode === 'replay';
+export const isLiveMode = () => config.marketDataMode === 'live';
 
-/** Provenance tag stored with every observation: 'demo' or 'live'. */
-export const dataSource = () => (isDemoMode() ? 'demo' : 'live');
+/** Provenance tag stored with every observation: 'demo', 'replay' or 'live'. */
+export const dataSource = () => config.marketDataMode;
+
+/**
+ * Provenance used for *reads* of stored history. A replay reads the dataset it was
+ * configured with, while still writing its own observations under 'replay'.
+ */
+export const historySource = () => (isReplayMode() ? config.replay.datasetSource : dataSource());
 
 /**
  * Startup configuration check. Returns errors that prevent LIVE mode from working
@@ -102,8 +126,19 @@ export function validateConfig() {
   const errors = [];
   const warnings = [];
 
-  if (!['live', 'demo'].includes(config.marketDataMode)) {
+  if (!['live', 'demo', 'replay'].includes(config.marketDataMode)) {
     warnings.push(`MARKET_DATA_MODE="${config.marketDataMode}" is not recognised; using DEMO mode.`);
+  }
+
+  if (config.marketDataMode === 'replay') {
+    if (!config.replay.speeds.includes(config.replay.defaultSpeed)) {
+      warnings.push(
+        `REPLAY_SPEED=${config.replay.defaultSpeed} is not one of ${config.replay.speeds.join('/')}; the fastest allowed speed is used.`
+      );
+    }
+    if (config.replay.defaultSession && !/^\d{4}-\d{2}-\d{2}$/.test(config.replay.defaultSession)) {
+      warnings.push(`REPLAY_SESSION="${config.replay.defaultSession}" is not a YYYY-MM-DD date; the latest session is used.`);
+    }
   }
 
   if (config.marketDataMode === 'live') {

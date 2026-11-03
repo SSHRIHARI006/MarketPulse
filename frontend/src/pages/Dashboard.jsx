@@ -11,6 +11,7 @@ import RankingsPanel from '../components/RankingsPanel';
 import ActivityFeed from '../components/ActivityFeed';
 import SectorPerformance from '../components/SectorPerformance';
 import InsightsPanel from '../components/InsightsPanel';
+import ReplayPanel from '../components/ReplayPanel';
 
 const FEED_STATE_LABEL = {
   CONNECTING: 'connecting to the provider',
@@ -27,6 +28,9 @@ const FEED_STATE_LABEL = {
  * received valid live data, so it is driven by the backend's mode/receiving state.
  */
 function FeedBanner({ mode, connection, freshness }) {
+  // REPLAY has its own panel, whose disclosure is stronger than this banner.
+  if (mode === 'replay') return null;
+
   if (mode === 'demo') {
     return (
       <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-200/90">
@@ -74,7 +78,11 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-4">
-      <FeedBanner mode={market.mode} connection={market.connection} freshness={market.freshness} />
+      {market.mode === 'replay' ? (
+        <ReplayPanel />
+      ) : (
+        <FeedBanner mode={market.mode} connection={market.connection} freshness={market.freshness} />
+      )}
 
       <OverviewCards overview={overview.data} loading={overview.loading} error={overview.error} />
 

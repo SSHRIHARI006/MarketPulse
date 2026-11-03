@@ -1,12 +1,17 @@
 import { query } from '../config/database.js';
-import { config, dataSource, isDemoMode, validateConfig } from '../config/env.js';
+import { config, dataSource, isDemoMode, isReplayMode, validateConfig } from '../config/env.js';
 import { createDemoFeed } from '../feed/demoFeed.js';
 import { createUpstoxFeed } from '../feed/upstoxFeed.js';
 import { CONNECTION_STATES, marketStore } from './marketStore.js';
 import { MARKET_CAP_REFERENCE_DATE, NIFTY50_CONSTITUENT_DATE } from '../data/nifty50.js';
-import { ingestQuote } from './candle.service.js';
 import { percentChange, round, sanitizeTick } from '../utils/validators.js';
 import { latestSessionStart } from '../utils/time.js';
+import { ensureSessionLoaded, replaySnapshot } from '../replay/session.js';
+
+// One processing entry point for every mode (spec 8.2). Re-exported here because
+// this module was the historical import site for the tick pipeline.
+import { processTick, handleTicks } from './tickPipeline.js';
+export { processTick, handleTicks };
 
 let feed = null;
 let started = false;
@@ -108,32 +113,6 @@ async function hydrateFromDatabase() {
   return previousCloses;
 }
 
-/** Applies a tick to the store and the candle aggregator (sockets listen to the store). */
-export function processTick(tick) {
-  if (!tick || typeof tick.instrumentKey !== 'string') return false;
-
-  // Index instruments feed the overview cards, not the stock universe.
-  if (config.indices.some((index) => index.key === tick.instrumentKey)) {
-    return marketStore.applyIndexTick(tick.instrumentKey, tick);
-  }
-
-  const stock = marketStore.getStockByKey(tick.instrumentKey);
-  if (!stock) {
-    marketStore.recordRejectedTick();
-    return false;
-  }
-  if (!marketStore.applyTick(tick)) return false;
-  const quote = marketStore.getQuote(stock.id);
-  if (quote) ingestQuote(quote);
-  return true;
-}
-
-export function handleTicks(ticks) {
-  let accepted = 0;
-  for (const tick of ticks) if (processTick(tick)) accepted += 1;
-  return accepted;
-}
-
 /** Current tracked constituent list with live quote status (for /api/market/universe). */
 export function getUniverse() {
   const now = Date.now();
@@ -171,15 +150,25 @@ export async function startMarketData() {
   for (const error of errors) console.error(`[config] ${error}`);
 
   const stocks = await loadUniverse();
-  const previousCloses = await hydrateFromDatabase();
-
   const demo = isDemoMode();
+  const replay = isReplayMode();
+
+  // REPLAY starts from the first historical observation of the session, not from
+  // whatever price happened to be cached, so hydration is DEMO/LIVE only.
+  const previousCloses = replay ? new Map() : await hydrateFromDatabase();
+
   marketStore.setConnection({
-    mode: demo ? 'demo' : 'live',
-    state: demo ? CONNECTION_STATES.DISCONNECTED : CONNECTION_STATES.CONNECTING,
+    mode: replay ? 'replay' : demo ? 'demo' : 'live',
+    state: replay || demo ? CONNECTION_STATES.DISCONNECTED : CONNECTION_STATES.CONNECTING,
     connected: false,
     error: null
   });
+
+  if (replay) {
+    await startReplayMode(stocks);
+    console.log('[market] data source started in REPLAY (historical) mode');
+    return { mode: 'replay', stocks: stocks.length, ...replaySnapshot() };
+  }
 
   if (demo) {
     // The simulator "subscribes" to the whole universe, so the UI reports 50/50.
@@ -242,4 +231,20 @@ export async function stopMarketData() {
   marketStore.setConnection({ connected: false });
 }
 
-export const getMode = () => (isDemoMode() ? 'demo' : 'live');
+/**
+ * REPLAY mode never connects to a provider: it loads a stored session and waits for
+ * an explicit play command (spec 9.2). The subscription count reports the universe,
+ * not a provider subscription, so the UI cannot imply a live feed.
+ */
+async function startReplayMode(stocks) {
+  marketStore.setSubscription({ subscribed: stocks.length, total: stocks.length });
+  try {
+    await ensureSessionLoaded();
+    marketStore.setConnection({ state: CONNECTION_STATES.CONNECTED, connected: false, error: null });
+  } catch (error) {
+    console.error('[replay] could not load a session:', error.message);
+    marketStore.setConnection({ state: CONNECTION_STATES.AUTH_ERROR, connected: false, error: error.message });
+  }
+}
+
+export const getMode = () => config.marketDataMode;

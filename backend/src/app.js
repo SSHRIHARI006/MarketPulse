@@ -6,6 +6,7 @@ import stockRoutes from './routes/stock.routes.js';
 import analyticsRoutes from './routes/analytics.routes.js';
 import eventRoutes from './routes/event.routes.js';
 import watchlistRoutes from './routes/watchlist.routes.js';
+import replayRoutes from './routes/replay.routes.js';
 import { errorHandler, notFoundHandler } from './middleware/error.middleware.js';
 
 export function createApp() {
@@ -21,6 +22,7 @@ export function createApp() {
   app.use('/api/analytics', analyticsRoutes);
   app.use('/api/events', eventRoutes);
   app.use('/api/watchlists', watchlistRoutes);
+  app.use('/api/replay', replayRoutes);
 
   app.use(notFoundHandler);
   app.use(errorHandler);

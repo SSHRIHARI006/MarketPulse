@@ -20,7 +20,9 @@ const RANGE_LABELS = {
  * never rendered as zero movement.
  */
 export function buildHeatmap({ range = 'daily', sector = 'all', sizeBy = 'marketCap' } = {}) {
-  const now = Date.now();
+  // Intraday baselines are looked up on the simulated clock during a replay; the wall
+  // clock would place every historical point outside the lookback window.
+  const now = marketStore.nowTs();
   const quotes = marketStore.listQuotes();
 
   const tiles = quotes.map((quote) => {
