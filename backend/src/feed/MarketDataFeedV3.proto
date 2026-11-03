@@ -1,0 +1,124 @@
+// MarketPulse copy of the Upstox Market Data Feed V3 message schema.
+//
+// Upstox publishes the authoritative file at
+// https://upstox.com/developer/api-documentation/v3/get-market-data-feed/
+// and the assets host. That file is the source of truth: if Upstox revises field
+// numbers, download the updated proto and point UPSTOX_PROTO_PATH at it
+// (`npm run fetch-proto` in backend/ helps). This copy mirrors the documented V3
+// response shape (ltpc / fullFeed.marketFF / firstLevelWithGreeks) and is only
+// used for decoding in LIVE mode.
+//
+// Decoding is always driven by field *names*, so switching files does not require
+// code changes as long as the message names below are preserved.
+
+syntax = "proto3";
+
+package com.upstox.marketdatafeederv3udapi.rpc.proto;
+
+message LTPC {
+  double ltp = 1;
+  int64 ltt = 2;
+  int64 ltq = 3;
+  double cp = 4;
+  double iep = 5;
+}
+
+message Quote {
+  int64 bidQ = 1;
+  double bidP = 2;
+  int64 askQ = 3;
+  double askP = 4;
+}
+
+message MarketLevel {
+  repeated Quote bidAskQuote = 1;
+}
+
+message OptionGreeks {
+  double delta = 1;
+  double theta = 2;
+  double gamma = 3;
+  double vega = 4;
+  double rho = 5;
+}
+
+message OHLC {
+  string interval = 1;
+  double open = 2;
+  double high = 3;
+  double low = 4;
+  double close = 5;
+  int64 vol = 6;
+  int64 ts = 7;
+}
+
+message MarketOHLC {
+  repeated OHLC ohlc = 1;
+}
+
+message ExtendedFeedDetails {
+  double atp = 1;
+  int64 cp = 2;
+  int64 vtt = 3;
+  double oi = 4;
+  double iv = 5;
+  double tbq = 6;
+  double tsq = 7;
+  double iep = 8;
+  string rp = 9;
+  string ieq = 10;
+  string iiqTotal = 11;
+  string iiqM = 12;
+  bool casEligible = 13;
+}
+
+message MarketFullFeed {
+  LTPC ltpc = 1;
+  MarketLevel marketLevel = 2;
+  OptionGreeks optionGreeks = 3;
+  MarketOHLC marketOHLC = 4;
+  ExtendedFeedDetails eFeedDetails = 5;
+}
+
+message IndexFullFeed {
+  LTPC ltpc = 1;
+  MarketOHLC marketOHLC = 2;
+}
+
+message FullFeed {
+  oneof FullFeedUnion {
+    MarketFullFeed marketFF = 1;
+    IndexFullFeed indexFF = 2;
+  }
+}
+
+message FirstLevelWithGreeks {
+  LTPC ltpc = 1;
+  Quote firstDepth = 2;
+  OptionGreeks optionGreeks = 3;
+  int64 vtt = 4;
+  double oi = 5;
+  double iv = 6;
+}
+
+message Feed {
+  oneof FeedUnion {
+    LTPC ltpc = 1;
+    FullFeed fullFeed = 2;
+    FirstLevelWithGreeks firstLevelWithGreeks = 3;
+  }
+  string requestMode = 4;
+}
+
+message MarketInfo {
+  map<string, string> segmentStatus = 1;
+  map<string, string> casMarketStatus = 2;
+  map<string, string> preOpenSessionStatus = 3;
+}
+
+message FeedResponse {
+  string type = 1;
+  map<string, Feed> feeds = 2;
+  int64 currentTs = 3;
+  MarketInfo marketInfo = 4;
+}

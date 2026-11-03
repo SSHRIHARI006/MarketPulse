@@ -1,0 +1,35 @@
+# dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# build output
+dist/
+build/
+.vite/
+
+# environment & secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# logs
+*.log
+npm-debug.log*
+logs/
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# test coverage
+coverage/
+.nyc_output/
+
+# local data dumps
+*.sql.gz
+*.dump

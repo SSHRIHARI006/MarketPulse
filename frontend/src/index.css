@@ -1,0 +1,130 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-ink-950 text-slate-200 antialiased;
+  }
+
+  ::selection {
+    @apply bg-sky-500/30;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl border border-slate-800/80 bg-ink-900/70 shadow-lg shadow-black/20;
+  }
+
+  .card-header {
+    @apply flex items-center justify-between gap-3 border-b border-slate-800/70 px-4 py-3;
+  }
+
+  .card-title {
+    @apply text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400;
+  }
+
+  .select {
+    @apply rounded-lg border border-slate-700/80 bg-ink-850 px-2.5 py-1.5 text-xs text-slate-200
+      outline-none transition focus:border-sky-500/60 focus:ring-2 focus:ring-sky-500/20;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold
+      transition focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/40;
+  }
+
+  .btn-primary {
+    @apply btn bg-sky-500 text-slate-950 hover:bg-sky-400;
+  }
+
+  .btn-ghost {
+    @apply btn border border-slate-700 text-slate-300 hover:border-slate-500 hover:text-white;
+  }
+
+  .mono {
+    @apply font-mono tabular-nums;
+  }
+
+  .stat-label {
+    @apply text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500;
+  }
+
+  .scroll-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(51 65 85) transparent;
+  }
+
+  .scroll-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .scroll-thin::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-slate-700;
+  }
+}
+
+/* Tiles that received a tick in the last few seconds get a subtle pulse. */
+@keyframes tile-flash {
+  0% {
+    stroke-opacity: 0.9;
+  }
+  100% {
+    stroke-opacity: 0;
+  }
+}
+
+.tile-recent {
+  animation: tile-flash 1.8s ease-out;
+  stroke: #e2e8f0;
+  stroke-width: 1.5;
+}
+
+/* Brief green/red wash on a tile whose price just moved (up or down). */
+@keyframes tile-flash-up {
+  0% {
+    fill: rgba(34, 197, 94, 0.55);
+  }
+  100% {
+    fill: rgba(34, 197, 94, 0);
+  }
+}
+
+@keyframes tile-flash-down {
+  0% {
+    fill: rgba(244, 63, 94, 0.55);
+  }
+  100% {
+    fill: rgba(244, 63, 94, 0);
+  }
+}
+
+.tile-flash-up {
+  animation: tile-flash-up 1s ease-out forwards;
+}
+
+.tile-flash-down {
+  animation: tile-flash-down 1s ease-out forwards;
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.live-dot {
+  animation: pulse-dot 2s ease-in-out infinite;
+}
